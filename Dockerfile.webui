@@ -1,0 +1,6 @@
+FROM node:20-slim
+WORKDIR /app
+COPY webui/package.json webui/package-lock.json* ./
+RUN npm install --omit=dev
+COPY webui/server.js webui/index.html ./
+CMD ["node", "server.js"]

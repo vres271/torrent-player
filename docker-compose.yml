@@ -1,0 +1,91 @@
+services:
+  amnezia-vpn:
+    image: isonecom/amneziawg-client:latest
+    container_name: amnezia-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.ip_forward=1
+    volumes:
+      - ./wg0.setconf:/config/wg0.setconf:ro
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        amneziawg-go wg0 &
+        sleep 1
+        awg setconf wg0 /config/wg0.setconf
+        ip -4 address add 10.8.0.2/24 dev wg0 || true
+        ip link set mtu 1420 up dev wg0
+        GW="$$(ip route show default | awk '{print $$3}' | head -n1)"
+        ip route replace 109.248.162.130/32 via "$$GW" dev eth0
+        ip route replace default dev wg0
+        tail -f /dev/null
+
+  normal-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: normal-app
+    restart: unless-stopped
+    environment:
+      - PORT=3001
+      - MODE=NORMAL
+    expose:
+      - "3001"
+
+  vpn-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: vpn-app
+    restart: unless-stopped
+    depends_on:
+      - amnezia-vpn
+    network_mode: service:amnezia-vpn
+    environment:
+      - PORT=3002
+      - MODE=VPN
+    # expose тут не нужно/не работает, но внутри namespace порт будет слушаться
+
+  webui:
+    build:
+      context: .
+      dockerfile: Dockerfile.webui
+    container_name: webui
+    restart: unless-stopped
+    depends_on:
+      - normal-app
+      - vpn-app
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - NORMAL_URL=http://normal-app:3001/test
+      - VPN_URL=http://amnezia-vpn:3002/test
+      - TORAPI_BASE=http://amnezia-vpn:8443
+
+  torapi:
+    image: lifailon/torapi:latest
+    container_name: torapi
+    restart: unless-stopped
+    depends_on:
+      - amnezia-vpn
+    network_mode: service:amnezia-vpn
+    # TorAPI будет доступен внутри сети как amnezia-vpn:8443, т.к. делит netns
+
+  dl-proxy:
+    image: node:20-slim
+    container_name: dl-proxy
+    restart: unless-stopped
+    depends_on:
+      - amnezia-vpn
+    network_mode: service:amnezia-vpn
+    volumes:
+      - ./dl-proxy/server.js:/app/server.js:ro
+    working_dir: /app
+    command: ["/bin/sh","-ec","node /app/server.js"]
+
