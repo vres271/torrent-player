@@ -79,7 +79,6 @@
             display: flex;
             justify-content: space-around;
         }
-
     </style>
 </head>
 
@@ -214,6 +213,13 @@
             }
         }
 
+        async function addToQb(ev, provider, id) {
+            ev.preventDefault();
+            const qbUrl = `/api/qb/add?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`;
+            const r = await fetch(qbUrl);
+            const res = await r.json();
+            r.ok ? alert("✅ Added to qB") : alert(`❌ qB: ${res.body}`);
+        }
 
 
         function esc(s) {
@@ -246,6 +252,7 @@
                     <div  class="tlinks">
                         ${x.Torrent ? `<a href="${esc(x.Torrent)}" target="_blank" rel="noreferrer" title="Torrent file">F</a>` : ''}
                         ${x.Id ? ` <a href="#" title="Get magnet" onclick="onMagnetClick(event,'${esc(x.provider)}','${esc(x.Id)}')">M</a>` : ''}
+                        ${x.Id ? ` <a href="#" title="Add to qB" onclick="addToQb(event,'${esc(x.provider)}','${esc(x.Id)}')">Q</a>` : ''}
                     </div>
                 </td>
             </tr>

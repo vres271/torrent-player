@@ -3,3 +3,5 @@ wg0.setconf
 *.conf
 *.key
 *.pem
+qb-config
+torrents

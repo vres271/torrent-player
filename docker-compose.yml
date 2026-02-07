@@ -61,13 +61,15 @@ services:
       - normal-app
       - vpn-app
     ports:
-      - "8080:8080"
+      - "8089:8080"
     environment:
       - PORT=8080
       - NORMAL_URL=http://normal-app:3001/test
       - VPN_URL=http://amnezia-vpn:3002/test
       - TORAPI_BASE=http://amnezia-vpn:8443
-
+      - QB_URL=http://qbittorrent:8081
+      - QB_USER=admin
+      - QB_PASS=adminadmin
   torapi:
     image: lifailon/torapi:latest
     container_name: torapi
@@ -88,4 +90,21 @@ services:
       - ./dl-proxy/server.js:/app/server.js:ro
     working_dir: /app
     command: ["/bin/sh","-ec","node /app/server.js"]
+
+  qbittorrent:
+    image: linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    restart: unless-stopped
+    environment:
+      - PUID=1000  # твой UID (id -u)
+      - PGID=1000  # твой GID (id -g)
+      - TZ=Europe/Moscow
+      - WEBUI_PORT=8081
+    volumes:
+      - ./torrents:/downloads  # общая папка с хостом
+      - ./qb-config:/config    # настройки
+    ports:
+      - "8081:8081"      # WebUI с хоста
+      - "6881:6881"      # торрент TCP
+      - "6881:6881/udp"  # торрент UDP
 

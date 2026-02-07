@@ -8,6 +8,38 @@ const port = Number(process.env.PORT || 8080);
 const normalUrl = process.env.NORMAL_URL;
 const vpnUrl = process.env.VPN_URL;
 
+function providerToPath(provider) {
+  const p = String(provider || "").trim();
+  const map = {
+    rutracker: "rutracker",
+    RuTracker: "rutracker",
+    kinozal: "kinozal",
+    Kinozal: "kinozal",
+    rutor: "rutor",
+    RuTor: "rutor",
+    nonameclub: "nonameclub",
+    NoNameClub: "nonameclub",
+  };
+  return map[p] || p.toLowerCase();
+}
+
+async function torApiMagnet(provider, id) {
+  const base = process.env.TORAPI_BASE;
+  if (!base) throw new Error("Missing TORAPI_BASE env");
+
+  const p = providerToPath(provider);
+  const url = `${base}/api/search/id/${encodeURIComponent(p)}?query=${encodeURIComponent(id)}`;
+
+  const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
+  const data = await r.json();
+
+  const item = Array.isArray(data) ? data[0] : data;
+  const magnet = item?.Magnet || item?.magnet || null;
+  if (!magnet) throw new Error("No magnet in TorAPI response");
+
+  return magnet;
+}
+
 app.get("/", (req, res) => res.sendFile("/app/index.html"));
 
 app.get("/api/test", async (req, res) => {
@@ -16,10 +48,7 @@ app.get("/api/test", async (req, res) => {
     return r.json();
   };
 
-  const [normal, vpn] = await Promise.allSettled([
-    fetchJson(normalUrl),
-    fetchJson(vpnUrl),
-  ]);
+  const [normal, vpn] = await Promise.allSettled([fetchJson(normalUrl), fetchJson(vpnUrl)]);
 
   const toLine = (label, r) => {
     if (r.status === "fulfilled") {
@@ -30,18 +59,14 @@ app.get("/api/test", async (req, res) => {
   };
 
   res.json({
-    lines: [
-      toLine("VPN", vpn),
-      toLine("NORMAL", normal),
-    ],
-    raw: { vpn, normal }
+    lines: [toLine("VPN", vpn), toLine("NORMAL", normal)],
+    raw: { vpn, normal },
   });
 });
 
 app.get("/api/search", async (req, res) => {
   const q = String(req.query.q || "").trim();
   const provider = String(req.query.provider || "all").trim();
-
   if (!q) return res.status(400).json({ ok: false, error: "Missing q" });
 
   const base = process.env.TORAPI_BASE; // например http://amnezia-vpn:8443
@@ -51,7 +76,6 @@ app.get("/api/search", async (req, res) => {
     const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
     const text = await r.text();
 
-    // TorAPI может вернуть JSON; если нет — отдадим как текст
     try {
       res.json({ ok: true, provider, query: q, data: JSON.parse(text) });
     } catch {
@@ -62,12 +86,10 @@ app.get("/api/search", async (req, res) => {
   }
 });
 
-
 app.get("/api/torrent", async (req, res) => {
   const url = String(req.query.url || "");
   if (!url) return res.status(400).json({ ok: false, error: "Missing url" });
 
-  // dl-proxy в VPN netns доступен как amnezia-vpn:8090
   const proxied = `http://amnezia-vpn:8090/torrent?url=${encodeURIComponent(url)}`;
 
   const r = await fetch(proxied, { signal: AbortSignal.timeout(30000) });
@@ -76,23 +98,20 @@ app.get("/api/torrent", async (req, res) => {
     return res.status(502).send(text || `Upstream ${r.status}`);
   }
 
-  // стримим клиенту
   res.statusCode = r.status;
 
-  // безопасные заголовки
   const ct = r.headers.get("content-type");
   if (ct) res.setHeader("content-type", ct);
 
   const cd = r.headers.get("content-disposition");
   if (cd) res.setHeader("content-disposition", cd);
 
-  // НЕ ставь content-length/transfer-encoding/content-encoding — пусть Node сам решит
-  // и не копируй connection/keep-alive и т.п.
-
-  if (!r.body) { res.end(); return; }
+  if (!r.body) {
+    res.end();
+    return;
+  }
 
   await pipeline(Readable.fromWeb(r.body), res);
-
 });
 
 app.get("/api/magnet", async (req, res) => {
@@ -102,36 +121,74 @@ app.get("/api/magnet", async (req, res) => {
   if (!provider) return res.status(400).json({ ok: false, error: "Missing provider" });
   if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
 
-  const base = process.env.TORAPI_BASE;
-  if (!base) return res.status(500).json({ ok: false, error: "Missing TORAPI_BASE env" });
+  try {
+    const magnet = await torApiMagnet(provider, id);
+    res.json({ ok: true, magnet });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
-  // Нормализуем provider: в UI у тебя "RuTracker", а TorAPI в path использует "rutracker"
-  const providerMap = {
-    rutracker: "rutracker",
-    RuTracker: "rutracker",
-    kinozal: "kinozal",
-    Kinozal: "kinozal",
-    rutor: "rutor",
-    RuTor: "rutor",
-    nonameclub: "nonameclub",
-    NoNameClub: "nonameclub",
-  };
+app.get("/api/qb/add", async (req, res) => {
+  const provider = String(req.query.provider || "").trim();
+  const id = String(req.query.id || "").trim();
+  if (!provider || !id) return res.status(400).json({ ok: false, error: "Missing provider/id" });
 
-  const p = providerMap[provider] || provider.toLowerCase();
+  const qbBase = process.env.QB_URL || "http://qbittorrent:8081";
+  const qbUser = process.env.QB_USER || "admin";
+  const qbPass = process.env.QB_PASS || "";
 
-  // TorAPI docs: /api/search/id/<provider>?query=<id> [web:407]
-  const url = `${base}/api/search/id/${encodeURIComponent(p)}?query=${encodeURIComponent(id)}`;
+  // Важно: Origin/Referer должны совпадать с Host (qbBase) иначе 401 [web:555]
+  const qbOrigin = new URL(qbBase).origin;
 
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
-    const data = await r.json();
+    // 1) magnet
+    const magnet = await torApiMagnet(provider, id);
 
-    const item = Array.isArray(data) ? data[0] : data;
-    const magnet = item?.Magnet || item?.magnet || null;
+    // 2) login -> SID cookie
+    const loginRes = await fetch(`${qbBase}/api/v2/auth/login`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "origin": qbOrigin,
+        "referer": qbOrigin + "/",
+      },
+      body: new URLSearchParams({ username: qbUser, password: qbPass }),
+      signal: AbortSignal.timeout(10000),
+    });
 
-    if (!magnet) return res.status(502).json({ ok: false, error: "No magnet in TorAPI response" });
+    const loginText = await loginRes.text().catch(() => "");
+    const setCookie = loginRes.headers.get("set-cookie") || "";
+    const sid = (setCookie.match(/SID=[^;]+/) || [])[0];
 
-    res.json({ ok: true, magnet });
+    if (!sid) {
+      return res.status(502).json({
+        ok: false,
+        error: "qB login failed (no SID)",
+        status: loginRes.status,
+        body: loginText || null,
+        hint: "Check qB logs for Origin/Referer mismatch; qbOrigin must match qbBase host:port.",
+      });
+    }
+
+    // 3) add torrent with cookie
+    const form = new FormData();
+    form.append("urls", magnet);
+    form.append("savepath", "/downloads");
+
+    const addRes = await fetch(`${qbBase}/api/v2/torrents/add`, {
+      method: "POST",
+      headers: {
+        "cookie": sid,
+        "origin": qbOrigin,
+        "referer": qbOrigin + "/",
+      },
+      body: form,
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const addText = await addRes.text().catch(() => "");
+    res.json({ ok: addRes.ok, status: addRes.status, body: addText || null });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
