@@ -74,6 +74,12 @@
         .name {
             max-width: 720px;
         }
+
+        .tlinks {
+            display: flex;
+            justify-content: space-around;
+        }
+
     </style>
 </head>
 
@@ -173,6 +179,42 @@
             return true;
         }
 
+        async function onMagnetClick(ev, provider, id) {
+            ev.preventDefault();
+            ev.stopPropagation();
+
+            if (!provider || !id) {
+                alert("No provider/id for magnet");
+                return;
+            }
+
+            const url = `/api/magnet?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`;
+
+            try {
+                const r = await fetch(url);
+
+                let raw;
+                const ct = (r.headers.get("content-type") || "").toLowerCase();
+                if (ct.includes("application/json")) raw = await r.json();
+                else {
+                    const text = await r.text();
+                    try { raw = JSON.parse(text); } catch { raw = { ok: false, error: text }; }
+                }
+
+                if (!r.ok) throw new Error(raw?.error || `HTTP ${r.status}`);
+                if (!raw?.ok) throw new Error(raw?.error || "magnet error");
+
+                const magnet = raw.magnet;
+                if (!magnet) throw new Error("No magnet in response");
+
+                // Открываем magnet: (запуск ассоциированного приложения)
+                window.location.href = magnet;
+            } catch (e) {
+                alert(String(e?.message || e));
+            }
+        }
+
+
 
         function esc(s) {
             return String(s ?? '').replace(/[&<>"']/g, ch => ({
@@ -200,8 +242,12 @@
                 <td>${esc(x.Peers ?? '')}</td>
                 <td>${esc(x.Date ?? '')}</td>
                 <td>${x.Url ? `<a href="${esc(x.Url)}" target="_blank" rel="noreferrer">topic</a>` : ''}</td>
-                <td>${x.Torrent ? `<a href="${esc(x.Torrent)}" target="_blank" rel="noreferrer">.torrent</a>` : ''}</td>
-                <td>${localTorrent ? `<a href="${localTorrent}" target="_blank">.localTorrent</a>` : ''}</td>
+                <td>
+                    <div  class="tlinks">
+                        ${x.Torrent ? `<a href="${esc(x.Torrent)}" target="_blank" rel="noreferrer" title="Torrent file">F</a>` : ''}
+                        ${x.Id ? ` <a href="#" title="Get magnet" onclick="onMagnetClick(event,'${esc(x.provider)}','${esc(x.Id)}')">M</a>` : ''}
+                    </div>
+                </td>
             </tr>
             `
             }).join('');
@@ -301,7 +347,7 @@
                 let items = flattenTorApiResponse(raw);
 
                 if (onlyVideo.checked) {
-                items = items.filter(isProbablyVideo);
+                    items = items.filter(isProbablyVideo);
                 }
 
                 items.forEach(x => x.__bytes = parseSizeToBytes(x.Size));

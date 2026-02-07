@@ -1,4 +1,6 @@
 const express = require("express");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
@@ -74,14 +76,65 @@ app.get("/api/torrent", async (req, res) => {
     return res.status(502).send(text || `Upstream ${r.status}`);
   }
 
-  // Пробрасываем заголовки, чтобы браузер скачал файл
-  res.setHeader("content-type", r.headers.get("content-type") || "application/x-bittorrent");
+  // стримим клиенту
+  res.statusCode = r.status;
+
+  // безопасные заголовки
+  const ct = r.headers.get("content-type");
+  if (ct) res.setHeader("content-type", ct);
+
   const cd = r.headers.get("content-disposition");
   if (cd) res.setHeader("content-disposition", cd);
 
-  // стримим клиенту
-  r.body.pipeTo(WritableStreamFromNode(res));
+  // НЕ ставь content-length/transfer-encoding/content-encoding — пусть Node сам решит
+  // и не копируй connection/keep-alive и т.п.
+
+  if (!r.body) { res.end(); return; }
+
+  await pipeline(Readable.fromWeb(r.body), res);
+
 });
 
+app.get("/api/magnet", async (req, res) => {
+  const provider = String(req.query.provider || "").trim();
+  const id = String(req.query.id || "").trim();
+
+  if (!provider) return res.status(400).json({ ok: false, error: "Missing provider" });
+  if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+
+  const base = process.env.TORAPI_BASE;
+  if (!base) return res.status(500).json({ ok: false, error: "Missing TORAPI_BASE env" });
+
+  // Нормализуем provider: в UI у тебя "RuTracker", а TorAPI в path использует "rutracker"
+  const providerMap = {
+    rutracker: "rutracker",
+    RuTracker: "rutracker",
+    kinozal: "kinozal",
+    Kinozal: "kinozal",
+    rutor: "rutor",
+    RuTor: "rutor",
+    nonameclub: "nonameclub",
+    NoNameClub: "nonameclub",
+  };
+
+  const p = providerMap[provider] || provider.toLowerCase();
+
+  // TorAPI docs: /api/search/id/<provider>?query=<id> [web:407]
+  const url = `${base}/api/search/id/${encodeURIComponent(p)}?query=${encodeURIComponent(id)}`;
+
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    const data = await r.json();
+
+    const item = Array.isArray(data) ? data[0] : data;
+    const magnet = item?.Magnet || item?.magnet || null;
+
+    if (!magnet) return res.status(502).json({ ok: false, error: "No magnet in TorAPI response" });
+
+    res.json({ ok: true, magnet });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 app.listen(port, () => console.log(`webui on ${port}`));
