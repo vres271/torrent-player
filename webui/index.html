@@ -79,6 +79,11 @@
             display: flex;
             justify-content: space-around;
         }
+
+        .row .push-right {
+            margin-left: auto;
+        }
+
     </style>
 </head>
 
@@ -104,6 +109,9 @@
         </label>
         <button id="btnRaw">Show raw JSON</button>
         <span id="searchStatus"></span>
+        <a id="qbLink" class="push-right" target="_blank" rel="noreferrer">
+        <button type="button">qB WebUI</button>
+        </a>
     </div>
 
     <div class="muted" id="searchMeta"></div>
@@ -122,6 +130,8 @@
         const q = document.getElementById('q');
         const onlyVideo = document.getElementById('onlyVideo');
 
+        const qbLink = document.getElementById('qbLink');
+        qbLink.href = `${location.protocol}//${location.hostname}:8081/`;
 
         let lastRaw = null;
 
