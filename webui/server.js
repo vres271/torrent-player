@@ -129,6 +129,62 @@ app.get("/api/magnet", async (req, res) => {
   }
 });
 
+function hashFromMagnet(magnet) {
+  const m = String(magnet || "").match(/xt=urn:btih:([A-Za-z0-9]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+async function qbLoginGetSid(qbBase, qbOrigin, qbUser, qbPass) {
+  const r = await fetch(`${qbBase}/api/v2/auth/login`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "origin": qbOrigin,
+      "referer": qbOrigin + "/",
+    },
+    body: new URLSearchParams({ username: qbUser, password: qbPass }),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  const text = await r.text().catch(() => "");
+  const setCookie = r.headers.get("set-cookie") || "";
+  const sid = (setCookie.match(/SID=[^;]+/) || [])[0];
+  return { ok: Boolean(sid), sid, status: r.status, body: text || null };
+}
+
+async function qbPostUrlEncoded(qbBase, qbOrigin, sid, path, params) {
+  const r = await fetch(`${qbBase}${path}`, {
+    method: "POST",
+    headers: {
+      "cookie": sid,
+      "origin": qbOrigin,
+      "referer": qbOrigin + "/",
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams(params),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  const text = await r.text().catch(() => "");
+  return { ok: r.ok, status: r.status, body: text || null };
+}
+
+async function qbGetJson(qbBase, qbOrigin, sid, pathWithQuery) {
+  const r = await fetch(`${qbBase}${pathWithQuery}`, {
+    method: "GET",
+    headers: {
+      "cookie": sid,
+      "origin": qbOrigin,
+      "referer": qbOrigin + "/",
+    },
+    signal: AbortSignal.timeout(10000),
+  });
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  return { ok: r.ok, status: r.status, text, json };
+}
+
 app.get("/api/qb/add", async (req, res) => {
   const provider = String(req.query.provider || "").trim();
   const id = String(req.query.id || "").trim();
@@ -137,41 +193,21 @@ app.get("/api/qb/add", async (req, res) => {
   const qbBase = process.env.QB_URL || "http://qbittorrent:8081";
   const qbUser = process.env.QB_USER || "admin";
   const qbPass = process.env.QB_PASS || "";
-
-  // Важно: Origin/Referer должны совпадать с Host (qbBase) иначе 401 [web:555]
   const qbOrigin = new URL(qbBase).origin;
 
   try {
-    // 1) magnet
+    // 1) Magnet
     const magnet = await torApiMagnet(provider, id);
+    const hash = hashFromMagnet(magnet);
+    if (!hash) return res.status(502).json({ ok: false, error: "Cannot extract hash from magnet (btih)" });
 
-    // 2) login -> SID cookie
-    const loginRes = await fetch(`${qbBase}/api/v2/auth/login`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-www-form-urlencoded",
-        "origin": qbOrigin,
-        "referer": qbOrigin + "/",
-      },
-      body: new URLSearchParams({ username: qbUser, password: qbPass }),
-      signal: AbortSignal.timeout(10000),
-    });
-
-    const loginText = await loginRes.text().catch(() => "");
-    const setCookie = loginRes.headers.get("set-cookie") || "";
-    const sid = (setCookie.match(/SID=[^;]+/) || [])[0];
-
-    if (!sid) {
-      return res.status(502).json({
-        ok: false,
-        error: "qB login failed (no SID)",
-        status: loginRes.status,
-        body: loginText || null,
-        hint: "Check qB logs for Origin/Referer mismatch; qbOrigin must match qbBase host:port.",
-      });
+    // 2) Login
+    const login = await qbLoginGetSid(qbBase, qbOrigin, qbUser, qbPass);
+    if (!login.ok) {
+      return res.status(502).json({ ok: false, error: "qB login failed (no SID)", status: login.status, body: login.body });
     }
 
-    // 3) add torrent with cookie
+    // 3) Add
     const form = new FormData();
     form.append("urls", magnet);
     form.append("savepath", "/downloads");
@@ -179,7 +215,7 @@ app.get("/api/qb/add", async (req, res) => {
     const addRes = await fetch(`${qbBase}/api/v2/torrents/add`, {
       method: "POST",
       headers: {
-        "cookie": sid,
+        "cookie": login.sid,
         "origin": qbOrigin,
         "referer": qbOrigin + "/",
       },
@@ -188,7 +224,57 @@ app.get("/api/qb/add", async (req, res) => {
     });
 
     const addText = await addRes.text().catch(() => "");
-    res.json({ ok: addRes.ok, status: addRes.status, body: addText || null });
+    if (!addRes.ok) {
+      return res.status(502).json({ ok: false, error: "qB add failed", status: addRes.status, body: addText || null });
+    }
+
+    // 4) Read current flags (seq_dl, f_l_piece_prio)
+    const info = await qbGetJson(
+      qbBase,
+      qbOrigin,
+      login.sid,
+      `/api/v2/torrents/info?hashes=${encodeURIComponent(hash)}`
+    );
+
+    if (!info.ok || !Array.isArray(info.json) || info.json.length === 0) {
+      // Торрент мог ещё не появиться в списке мгновенно — вернём успех добавления, но без toggles
+      return res.json({
+        ok: true,
+        added: { ok: true, status: addRes.status, body: addText || null },
+        warn: "Added, but cannot read torrent info yet (try again in a second).",
+        infoStatus: info.status,
+      });
+    }
+
+    const t = info.json[0];
+    const needSeqOn = (t.seq_dl !== true);
+    const needFirstLastOff = (t.f_l_piece_prio === true);
+
+    // 5) Toggle only if needed
+    const actions = [];
+    if (needSeqOn) {
+      actions.push(["toggleSequentialDownload", await qbPostUrlEncoded(
+        qbBase, qbOrigin, login.sid,
+        "/api/v2/torrents/toggleSequentialDownload",
+        { hashes: hash }
+      )]);
+    }
+
+    if (needFirstLastOff) {
+      actions.push(["toggleFirstLastPiecePrio", await qbPostUrlEncoded(
+        qbBase, qbOrigin, login.sid,
+        "/api/v2/torrents/toggleFirstLastPiecePrio",
+        { hashes: hash }
+      )]);
+    }
+
+    res.json({
+      ok: true,
+      hash,
+      added: { ok: true, status: addRes.status, body: addText || null },
+      before: { seq_dl: t.seq_dl, f_l_piece_prio: t.f_l_piece_prio },
+      actions: Object.fromEntries(actions),
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
