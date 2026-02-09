@@ -3,7 +3,7 @@
 
 <head>
     <meta charset="utf-8">
-    <title>VPN tools</title>
+    <title>Torrent Player</title>
     <style>
         body {
             font-family: sans-serif;
@@ -152,13 +152,17 @@
 
             // явные не-видео
             const nonVideo = [
-                // 'саундтрек', 'soundtrack', 'score',
-                // 'mp3', 'flac', 'aac', 'music',
-                // 'аудиокнига', 'audiobook',
-                // 'книга', 'book', 'epub', 'mobi', 'pdf', 'djvu',
-                // 'игра', 'game', 'ps', 'xbox', 'switch',
-                // 'софт', 'software', 'windows', 'linux', 'macos',
-                // 'ost'
+                'саундтрек', 'soundtrack',
+                'mp3', 'flac', 'aac', 'music',
+                'аудиокнига', 'audiobook',
+                'pdf', 'djvu','xbox',
+                'software',  'linux', 'macos',
+                'RePack', 'amd64', 'Portable', 'DLCs',
+
+                'windows',
+                'книга', 'book', 'epub', 'mobi', 
+                'игра', 'game', 'ps',  'switch',
+                'софт', 'ost', 'score',
             ];
 
             if (nonVideo.some(w => text.includes(w))) return false;
