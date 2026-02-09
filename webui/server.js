@@ -248,9 +248,8 @@ app.get("/api/qb/add", async (req, res) => {
 
     const t = info.json[0];
     const needSeqOn = (t.seq_dl !== true);
-    const needFirstLastOff = (t.f_l_piece_prio === true);
+    const needFirstLastOn = (t.f_l_piece_prio !== true);
 
-    // 5) Toggle only if needed
     const actions = [];
     if (needSeqOn) {
       actions.push(["toggleSequentialDownload", await qbPostUrlEncoded(
@@ -260,7 +259,7 @@ app.get("/api/qb/add", async (req, res) => {
       )]);
     }
 
-    if (needFirstLastOff) {
+    if (needFirstLastOn) {
       actions.push(["toggleFirstLastPiecePrio", await qbPostUrlEncoded(
         qbBase, qbOrigin, login.sid,
         "/api/v2/torrents/toggleFirstLastPiecePrio",
