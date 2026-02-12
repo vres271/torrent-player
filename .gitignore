@@ -3,7 +3,4 @@ wg0.setconf
 qb-config/
 !qb-config/qBittorrent/
 !qb-config/qBittorrent/qBittorrent.conf
-qb-config/BT_backup/
-qb-config/logs/
-qb-config/rss/
 torrents
