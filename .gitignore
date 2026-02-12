@@ -1,5 +1,6 @@
-wg0.conf
-wg0.setconf
+*.conf
+*.setconf
+vpn-user-config
 qb-config/
 !qb-config/qBittorrent/
 !qb-config/qBittorrent/qBittorrent.conf

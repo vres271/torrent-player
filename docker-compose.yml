@@ -5,24 +5,39 @@ services:
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
     devices:
       - /dev/net/tun:/dev/net/tun
-    sysctls:
-      - net.ipv4.ip_forward=1
     volumes:
-      - ./wg0.setconf:/config/wg0.setconf:ro
-    entrypoint: ["/bin/sh", "-ec"]
+      - ./vpn-user-config/wg0.conf:/config/wg0.conf:ro
+      - ./vpn:/vpn:ro
+    entrypoint: ["/bin/sh","-c"]
     command:
       - |
-        amneziawg-go wg0 &
-        sleep 1
+        set -e
+
+        /vpn/generate-wg0-setconf.sh
+
+        amneziawg-go wg0
         awg setconf wg0 /config/wg0.setconf
-        ip -4 address add 10.8.0.2/24 dev wg0 || true
+
+        ADDR="$$(awk -F' *= *' '/^Address[[:space:]]*=/{print $$2; exit}' /config/wg0.conf)"
+        ip -4 addr add "$$ADDR" dev wg0 || true
+
         ip link set mtu 1420 up dev wg0
+
+        DNS="$$(awk -F' *= *' '/^DNS[[:space:]]*=/{print $$2; exit}' /config/wg0.conf)"
+        if [ -n "$$DNS" ]; then
+          printf "nameserver %s\n" "$$DNS" > /etc/resolv.conf
+        fi
+
+        ENDPOINT_IP="$$(awk -F'[ =:]+' '/^Endpoint/ {print $$2; exit}' /config/wg0.setconf)"
         GW="$$(ip route show default | awk '{print $$3}' | head -n1)"
-        ip route replace 109.248.162.130/32 via "$$GW" dev eth0
+        if [ -n "$$ENDPOINT_IP" ] && [ -n "$$GW" ]; then
+          ip route replace "$$ENDPOINT_IP/32" via "$$GW"
+        fi
+
         ip route replace default dev wg0
+
         tail -f /dev/null
 
   normal-app:
@@ -49,7 +64,6 @@ services:
     environment:
       - PORT=3002
       - MODE=VPN
-    # expose тут не нужно/не работает, но внутри namespace порт будет слушаться
 
   webui:
     build:
