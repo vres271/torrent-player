@@ -1,0 +1,61 @@
+# Torrent Player (VPN split routing)
+
+Проект разворачивается “с нуля” через Docker Compose; единственное, что нужно добавить вручную — твой VPN-конфиг (WireGuard/AmneziaWG).
+
+## Требования
+
+- Docker и Docker Compose v2.
+- VPN-конфиг в виде `wg0.conf` (WireGuard/AmneziaWG).
+
+
+## Установка
+
+```bash
+git clone <REPO_URL>
+cd <repo>
+```
+
+
+## VPN-конфиг (обязательно)
+
+Положи свой конфиг в репозиторий **локально** (файл приватный, в git не добавляем):
+
+```
+vpn-user-config/wg0.conf
+```
+
+Дальше контейнеры используют этот конфиг для поднятия туннеля.
+
+## Запуск
+
+```bash
+docker compose up -d
+```
+
+Остановить:
+
+```bash
+docker compose down
+```
+
+Посмотреть логи (если нужно):
+
+```bash
+docker compose logs -f
+```
+
+
+## Порты и доступ
+
+- UI проекта: `http://localhost:8089`
+- qBittorrent WebUI: `http://localhost:8081`
+
+Если меняешь порт WebUI у qBittorrent, нужно менять и проброс порта, и переменную `WEBUI_PORT` на одно и то же значение (это требование из-за особенностей CSRF/port mapping).
+
+## Как устроена сеть
+
+- `amnezia-vpn` поднимает VPN и является “сетевым неймспейсом” для сервисов, которым нужен выход через VPN.
+- `vpn-app`, `torapi`, `dl-proxy` запускаются с `network_mode: service:amnezia-vpn`, поэтому их исходящий трафик идёт через VPN.
+- `normal-app` и `qbittorrent` работают вне VPN (напрямую).
+
+
