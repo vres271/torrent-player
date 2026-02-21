@@ -5,3 +5,4 @@ qb-config/
 !qb-config/qBittorrent/
 !qb-config/qBittorrent/qBittorrent.conf
 torrents
+*.stackdump
