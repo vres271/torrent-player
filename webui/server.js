@@ -1,12 +1,101 @@
 const express = require("express");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
+const path = require('path');
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
 
 const normalUrl = process.env.NORMAL_URL;
 const vpnUrl = process.env.VPN_URL;
+
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get("/", (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ========== Конфигурация ==========
+const config = {
+  qb: {
+    base: process.env.QB_URL || "http://qbittorrent:8081",
+    user: process.env.QB_USER || "admin",
+    pass: process.env.QB_PASS || ""
+  },
+  torapi: {
+    base: process.env.TORAPI_BASE
+  }
+};
+
+// ========== Утилиты для qBittorrent ==========
+async function withQbAuth(callback) {
+  const qbBase = config.qb.base;
+  const qbOrigin = new URL(qbBase).origin;
+  
+  const login = await qbLoginGetSid(qbBase, qbOrigin, config.qb.user, config.qb.pass);
+  if (!login.ok) {
+    throw { type: 'auth', error: "qB login failed (no SID)", status: login.status, body: login.body };
+  }
+  
+  return await callback({ qbBase, qbOrigin, sid: login.sid });
+}
+
+async function qbFetch(path, options = {}) {
+  return withQbAuth(async ({ qbBase, qbOrigin, sid }) => {
+    const defaultHeaders = {
+      "cookie": sid,
+      "origin": qbOrigin,
+      "referer": qbOrigin + "/",
+      "accept": "*/*",
+      "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+      "dnt": "1",
+      "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin"
+    };
+
+    const fetchOptions = {
+      method: options.method || 'GET',
+      headers: { ...defaultHeaders, ...(options.headers || {}) },
+      signal: AbortSignal.timeout(options.timeout || 10000),
+      ...(options.body && { body: options.body })
+    };
+
+    const response = await fetch(`${qbBase}${path}`, fetchOptions);
+    const text = await response.text().catch(() => "");
+    
+    return {
+      ok: response.status === 200,
+      status: response.status,
+      body: text,
+      headers: response.headers,
+      response
+    };
+  });
+}
+
+async function qbPostForm(path, params) {
+  const searchParams = new URLSearchParams(params);
+  
+  return qbFetch(path, {
+    method: 'POST',
+    headers: {
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8"
+    },
+    body: searchParams.toString()
+  });
+}
+
+async function qbGetJson(pathWithQuery) {
+  const result = await qbFetch(pathWithQuery);
+  let json = null;
+  try { json = JSON.parse(result.body); } catch {}
+  return { ...result, json };
+}
 
 function providerToPath(provider) {
   const p = String(provider || "").trim();
@@ -24,7 +113,7 @@ function providerToPath(provider) {
 }
 
 async function torApiMagnet(provider, id) {
-  const base = process.env.TORAPI_BASE;
+  const base = config.torapi.base;
   if (!base) throw new Error("Missing TORAPI_BASE env");
 
   const p = providerToPath(provider);
@@ -40,7 +129,30 @@ async function torApiMagnet(provider, id) {
   return magnet;
 }
 
-app.get("/", (req, res) => res.sendFile("/app/index.html"));
+function hashFromMagnet(magnet) {
+  const m = String(magnet || "").match(/xt=urn:btih:([A-Za-z0-9]+)/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+async function qbLoginGetSid(qbBase, qbOrigin, qbUser, qbPass) {
+  const r = await fetch(`${qbBase}/api/v2/auth/login`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "origin": qbOrigin,
+      "referer": qbOrigin + "/",
+    },
+    body: new URLSearchParams({ username: qbUser, password: qbPass }),
+    signal: AbortSignal.timeout(10000),
+  });
+
+  const text = await r.text().catch(() => "");
+  const setCookie = r.headers.get("set-cookie") || "";
+  const sid = (setCookie.match(/SID=[^;]+/) || [])[0];
+  return { ok: Boolean(sid), sid, status: r.status, body: text || null };
+}
+
+// ========== Эндпоинты ==========
 
 app.get("/api/test", async (req, res) => {
   const fetchJson = async (url) => {
@@ -69,7 +181,7 @@ app.get("/api/search", async (req, res) => {
   const provider = String(req.query.provider || "all").trim();
   if (!q) return res.status(400).json({ ok: false, error: "Missing q" });
 
-  const base = process.env.TORAPI_BASE; // например http://amnezia-vpn:8443
+  const base = config.torapi.base;
   const url = `${base}/api/search/title/${encodeURIComponent(provider)}?query=${encodeURIComponent(q)}`;
 
   try {
@@ -129,71 +241,82 @@ app.get("/api/magnet", async (req, res) => {
   }
 });
 
-function hashFromMagnet(magnet) {
-  const m = String(magnet || "").match(/xt=urn:btih:([A-Za-z0-9]+)/i);
-  return m ? m[1].toLowerCase() : null;
-}
+// Новый эндпоинт для получения списка загрузок
+app.get("/api/qb/downloads", async (req, res) => {
+  try {
+    const info = await qbGetJson("/api/v2/torrents/info");
+    if (!info.ok) {
+      return res.status(502).json({ ok: false, error: "Failed to get torrents info" });
+    }
+    res.json({ ok: true, torrents: info.json || [] });
+  } catch (e) {
+    if (e.type === 'auth') {
+      res.status(502).json({ ok: false, error: e.error, status: e.status, body: e.body });
+    } else {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  }
+});
 
-async function qbLoginGetSid(qbBase, qbOrigin, qbUser, qbPass) {
-  const r = await fetch(`${qbBase}/api/v2/auth/login`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      "origin": qbOrigin,
-      "referer": qbOrigin + "/",
-    },
-    body: new URLSearchParams({ username: qbUser, password: qbPass }),
-    signal: AbortSignal.timeout(10000),
-  });
+// СТАРТ (возобновление) торрента - правильный эндпоинт /start
+app.post("/api/qb/start", async (req, res) => {
+  const { hash } = req.body;
+  if (!hash) return res.status(400).json({ ok: false, error: "Missing hash" });
 
-  const text = await r.text().catch(() => "");
-  const setCookie = r.headers.get("set-cookie") || "";
-  const sid = (setCookie.match(/SID=[^;]+/) || [])[0];
-  return { ok: Boolean(sid), sid, status: r.status, body: text || null };
-}
+  try {
+    const result = await qbPostForm("/api/v2/torrents/start", { hashes: hash });
+    res.json(result);
+  } catch (e) {
+    handleQbError(res, e);
+  }
+});
 
-async function qbPostUrlEncoded(qbBase, qbOrigin, sid, path, params) {
-  const r = await fetch(`${qbBase}${path}`, {
-    method: "POST",
-    headers: {
-      "cookie": sid,
-      "origin": qbOrigin,
-      "referer": qbOrigin + "/",
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams(params),
-    signal: AbortSignal.timeout(10000),
-  });
+// СТОП (пауза) торрента - правильный эндпоинт /stop
+app.post("/api/qb/stop", async (req, res) => {
+  const { hash } = req.body;
+  if (!hash) return res.status(400).json({ ok: false, error: "Missing hash" });
 
-  const text = await r.text().catch(() => "");
-  return { ok: r.ok, status: r.status, body: text || null };
-}
+  try {
+    const result = await qbPostForm("/api/v2/torrents/stop", { hashes: hash });
+    res.json(result);
+  } catch (e) {
+    handleQbError(res, e);
+  }
+});
 
-async function qbGetJson(qbBase, qbOrigin, sid, pathWithQuery) {
-  const r = await fetch(`${qbBase}${pathWithQuery}`, {
-    method: "GET",
-    headers: {
-      "cookie": sid,
-      "origin": qbOrigin,
-      "referer": qbOrigin + "/",
-    },
-    signal: AbortSignal.timeout(10000),
-  });
-  const text = await r.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch {}
-  return { ok: r.ok, status: r.status, text, json };
-}
+// Удаление торрента
+app.post("/api/qb/delete", async (req, res) => {
+  const { hash, deleteFiles = true } = req.body;
+  if (!hash) return res.status(400).json({ ok: false, error: "Missing hash" });
+
+  try {
+    const result = await qbPostForm("/api/v2/torrents/delete", { 
+      hashes: hash, 
+      deleteFiles: deleteFiles ? 'true' : 'false' 
+    });
+    res.json(result);
+  } catch (e) {
+    handleQbError(res, e);
+  }
+});
+
+// Получение глобальной статистики qBittorrent
+app.get("/api/qb/global", async (req, res) => {
+  try {
+    const info = await qbGetJson("/api/v2/transfer/info");
+    if (!info.ok) {
+      return res.status(502).json({ ok: false, error: "Failed to get transfer info" });
+    }
+    res.json({ ok: true, global: info.json || {} });
+  } catch (e) {
+    handleQbError(res, e);
+  }
+});
 
 app.get("/api/qb/add", async (req, res) => {
   const provider = String(req.query.provider || "").trim();
   const id = String(req.query.id || "").trim();
   if (!provider || !id) return res.status(400).json({ ok: false, error: "Missing provider/id" });
-
-  const qbBase = process.env.QB_URL || "http://qbittorrent:8081";
-  const qbUser = process.env.QB_USER || "admin";
-  const qbPass = process.env.QB_PASS || "";
-  const qbOrigin = new URL(qbBase).origin;
 
   try {
     // 1) Magnet
@@ -201,46 +324,39 @@ app.get("/api/qb/add", async (req, res) => {
     const hash = hashFromMagnet(magnet);
     if (!hash) return res.status(502).json({ ok: false, error: "Cannot extract hash from magnet (btih)" });
 
-    // 2) Login
-    const login = await qbLoginGetSid(qbBase, qbOrigin, qbUser, qbPass);
-    if (!login.ok) {
-      return res.status(502).json({ ok: false, error: "qB login failed (no SID)", status: login.status, body: login.body });
-    }
+    // 2) Добавление торрента (используем withQbAuth напрямую для FormData)
+    const addResult = await withQbAuth(async ({ qbBase, qbOrigin, sid }) => {
+      const form = new FormData();
+      form.append("urls", magnet);
+      form.append("savepath", "/downloads");
 
-    // 3) Add
-    const form = new FormData();
-    form.append("urls", magnet);
-    form.append("savepath", "/downloads");
+      const addRes = await fetch(`${qbBase}/api/v2/torrents/add`, {
+        method: "POST",
+        headers: {
+          "cookie": sid,
+          "origin": qbOrigin,
+          "referer": qbOrigin + "/",
+        },
+        body: form,
+        signal: AbortSignal.timeout(15000),
+      });
 
-    const addRes = await fetch(`${qbBase}/api/v2/torrents/add`, {
-      method: "POST",
-      headers: {
-        "cookie": login.sid,
-        "origin": qbOrigin,
-        "referer": qbOrigin + "/",
-      },
-      body: form,
-      signal: AbortSignal.timeout(15000),
+      const addText = await addRes.text().catch(() => "");
+      return { ok: addRes.ok, status: addRes.status, body: addText };
     });
 
-    const addText = await addRes.text().catch(() => "");
-    if (!addRes.ok) {
-      return res.status(502).json({ ok: false, error: "qB add failed", status: addRes.status, body: addText || null });
+    if (!addResult.ok) {
+      return res.status(502).json({ ok: false, error: "qB add failed", status: addResult.status, body: addResult.body });
     }
 
-    // 4) Read current flags (seq_dl, f_l_piece_prio)
-    const info = await qbGetJson(
-      qbBase,
-      qbOrigin,
-      login.sid,
-      `/api/v2/torrents/info?hashes=${encodeURIComponent(hash)}`
-    );
+    // 3) Чтение флагов
+    const info = await qbGetJson(`/api/v2/torrents/info?hashes=${encodeURIComponent(hash)}`);
 
     if (!info.ok || !Array.isArray(info.json) || info.json.length === 0) {
-      // Торрент мог ещё не появиться в списке мгновенно — вернём успех добавления, но без toggles
       return res.json({
         ok: true,
-        added: { ok: true, status: addRes.status, body: addText || null },
+        hash,
+        added: addResult,
         warn: "Added, but cannot read torrent info yet (try again in a second).",
         infoStatus: info.status,
       });
@@ -252,16 +368,14 @@ app.get("/api/qb/add", async (req, res) => {
 
     const actions = [];
     if (needSeqOn) {
-      actions.push(["toggleSequentialDownload", await qbPostUrlEncoded(
-        qbBase, qbOrigin, login.sid,
+      actions.push(["toggleSequentialDownload", await qbPostForm(
         "/api/v2/torrents/toggleSequentialDownload",
         { hashes: hash }
       )]);
     }
 
     if (needFirstLastOn) {
-      actions.push(["toggleFirstLastPiecePrio", await qbPostUrlEncoded(
-        qbBase, qbOrigin, login.sid,
+      actions.push(["toggleFirstLastPiecePrio", await qbPostForm(
         "/api/v2/torrents/toggleFirstLastPiecePrio",
         { hashes: hash }
       )]);
@@ -270,13 +384,22 @@ app.get("/api/qb/add", async (req, res) => {
     res.json({
       ok: true,
       hash,
-      added: { ok: true, status: addRes.status, body: addText || null },
+      added: addResult,
       before: { seq_dl: t.seq_dl, f_l_piece_prio: t.f_l_piece_prio },
       actions: Object.fromEntries(actions),
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    handleQbError(res, e);
   }
 });
+
+// ========== Обработчик ошибок ==========
+function handleQbError(res, e) {
+  if (e.type === 'auth') {
+    res.status(502).json({ ok: false, error: e.error, status: e.status, body: e.body });
+  } else {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+}
 
 app.listen(port, () => console.log(`webui on ${port}`));

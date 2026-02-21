@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Torrent Player</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+
+<body>
+    <h3>Connectivity test</h3>
+
+    <div class="row">
+        <button id="btnTest">Test</button>
+        <span id="testStatus"></span>
+    </div>
+
+    <pre id="testOut"></pre>
+
+    <hr>
+
+    <div class="downloads-section">
+        <div class="downloads-header">
+            <h4>📥 Active downloads (qBittorrent)</h4>
+            <div class="downloads-controls">
+                <span class="last-update" id="downloadsLastUpdate"></span>
+                <button id="refreshDownloads" class="refresh-btn">🔄 Refresh</button>
+                <button id="toggleAutoRefresh" class="refresh-btn">⏸️ Pause auto-refresh</button>
+            </div>
+        </div>
+        <div id="downloadsTableContainer">
+            <table class="downloads-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Size</th>
+                        <th>Progress</th>
+                        <th>Downloaded</th>
+                        <th>Speed</th>
+                        <th>Peers</th>
+                        <th>Seeds</th>
+                        <th>Status</th>
+                        <th>ETA</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="downloadsTbody">
+                    <tr>
+                        <td colspan="10" style="text-align: center;">Loading downloads...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <h3>TorAPI search</h3>
+
+    <div class="row">
+        <input id="q" placeholder="Часть названия фильма..." />
+        <button id="btnSearch">Search</button>
+        <label style="user-select:none;">
+            <input type="checkbox" id="onlyVideo" checked> Only video
+        </label>
+        <button id="btnRaw">Show raw JSON</button>
+        <span id="searchStatus"></span>
+        <a id="qbLink" class="push-right" target="_blank" rel="noreferrer">
+        <button type="button">qB WebUI</button>
+        </a>
+    </div>
+
+    <div class="muted" id="searchMeta"></div>
+
+    <div id="tableWrap"></div>
+    <pre id="searchOut" style="display:none;"></pre>
+
+    <script src="/script.js"></script>
+</body>
+
+</html>

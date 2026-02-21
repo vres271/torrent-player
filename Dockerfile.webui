@@ -1,6 +1,12 @@
 FROM node:20-slim
 WORKDIR /app
+
+# Копируем package файлы
 COPY webui/package.json webui/package-lock.json* ./
 RUN npm install --omit=dev
-COPY webui/server.js webui/index.html ./
+
+# Копируем все необходимые файлы
+COPY webui/server.js ./
+COPY webui/public ./public/
+
 CMD ["node", "server.js"]
