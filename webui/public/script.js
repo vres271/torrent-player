@@ -1,3 +1,14 @@
+// Глобальные переменные
+let lastRaw = null;
+let autoRefreshEnabled = true;
+let isRefreshing = false;
+
+// Для управления раскрытым торрентом и автообновлением файлов
+let expandedHash = null;           // хеш текущего раскрытого торрента
+let filesRefreshInterval = null;   // интервал для обновления файлов
+let filesCache = {};               // кэш файлов по хешу
+
+// DOM элементы
 const testOut = document.getElementById('testOut');
 const testStatus = document.getElementById('testStatus');
 
@@ -11,18 +22,12 @@ const onlyVideo = document.getElementById('onlyVideo');
 const qbLink = document.getElementById('qbLink');
 qbLink.href = `${location.protocol}//${location.hostname}:8081/`;
 
-// Downloads elements
 const downloadsTbody = document.getElementById('downloadsTbody');
 const refreshBtn = document.getElementById('refreshDownloads');
 const toggleAutoRefresh = document.getElementById('toggleAutoRefresh');
 const lastUpdateSpan = document.getElementById('downloadsLastUpdate');
 
-let lastRaw = null;
-let autoRefreshInterval = null;
-let autoRefreshEnabled = true;
-let isRefreshing = false;
-
-// Format bytes to human readable
+// ========== Вспомогательные функции ==========
 function formatBytes(bytes, decimals = 2) {
     if (bytes === 0 || !bytes) return '0 B';
     const k = 1024;
@@ -32,13 +37,11 @@ function formatBytes(bytes, decimals = 2) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
-// Format speed
 function formatSpeed(bytesPerSec) {
     if (!bytesPerSec || bytesPerSec === 0) return '0 B/s';
     return formatBytes(bytesPerSec) + '/s';
 }
 
-// Format ETA
 function formatETA(eta) {
     if (eta === 8640000) return '∞';
     if (eta < 0) return '0s';
@@ -48,7 +51,6 @@ function formatETA(eta) {
     return Math.floor(eta / 86400) + 'd ' + Math.floor((eta % 86400) / 3600) + 'h';
 }
 
-// Get status class
 function getStatusClass(state) {
     const stateLower = (state || '').toLowerCase();
     if (stateLower.includes('download')) return 'status-downloading';
@@ -58,18 +60,59 @@ function getStatusClass(state) {
     return 'status-waiting';
 }
 
-// Format status for display
 function formatStatus(state) {
     if (!state) return 'Unknown';
-    return state.split('_').map(word =>
-        word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-    ).join(' ');
+    return state.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
 }
 
-// Load downloads from qBittorrent
+function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+}
+
+// ========== Управление автообновлением файлов ==========
+function startFilesAutoRefresh(hash) {
+    stopFilesAutoRefresh(); // остановить предыдущий интервал, если был
+    if (!hash) return;
+    // сразу загрузить файлы
+    loadFilesForHash(hash, true);
+    filesRefreshInterval = setInterval(() => {
+        if (expandedHash === hash) {
+            loadFilesForHash(hash, false); // тихо обновить кэш
+        } else {
+            // если раскрытый хеш изменился, остановим интервал
+            stopFilesAutoRefresh();
+        }
+    }, 2000); // каждые 2 секунды
+}
+
+function stopFilesAutoRefresh() {
+    if (filesRefreshInterval) {
+        clearInterval(filesRefreshInterval);
+        filesRefreshInterval = null;
+    }
+}
+
+async function loadFilesForHash(hash, forceRefresh = true) {
+    try {
+        const response = await fetch(`/api/qb/files?hash=${encodeURIComponent(hash)}`);
+        const data = await response.json();
+        if (data.ok && Array.isArray(data.files)) {
+            filesCache[hash] = data.files;
+        } else {
+            console.warn('Failed to load files for', hash, data);
+        }
+    } catch (e) {
+        console.error('Error loading files:', e);
+    } finally {
+        if (forceRefresh) loadDownloads(); // обновить отображение
+    }
+}
+
+// ========== Загрузки ==========
 async function loadDownloads() {
     if (isRefreshing) return;
-
     isRefreshing = true;
     refreshBtn.classList.add('refreshing');
     refreshBtn.textContent = '🔄 Refreshing...';
@@ -77,7 +120,6 @@ async function loadDownloads() {
     try {
         const response = await fetch('/api/qb/downloads');
         const data = await response.json();
-
         if (data.ok && Array.isArray(data.torrents)) {
             renderDownloads(data.torrents);
             lastUpdateSpan.textContent = `Last update: ${new Date().toLocaleTimeString()}`;
@@ -93,14 +135,14 @@ async function loadDownloads() {
     }
 }
 
-// Render downloads table
 function renderDownloads(torrents) {
     if (!torrents.length) {
         downloadsTbody.innerHTML = '<tr><td colspan="10" style="text-align: center;">No active downloads</td></tr>';
         return;
     }
 
-    const rows = torrents.map(t => {
+    let rows = [];
+    torrents.forEach(t => {
         const progress = t.progress * 100;
         const downloaded = t.completed || t.downloaded || (t.total_size * t.progress);
         const size = t.total_size || t.size || 0;
@@ -113,38 +155,135 @@ function renderDownloads(torrents) {
         const name = t.name || 'Unknown';
         const hash = t.hash || '';
 
-        return `
-                <tr>
-                    <td class="name" title="${esc(name)}">${esc(name.substring(0, 60))}${name.length > 60 ? '...' : ''}</td>
-                    <td>${formatBytes(size)}</td>
-                    <td style="min-width: 150px;">
-                        <div class="progress-bar-container">
-                            <div class="progress-bar" style="width: ${progress}%;"></div>
-                            <span class="progress-text">${progress.toFixed(1)}%</span>
-                        </div>
-                    </td>
-                    <td>${formatBytes(downloaded)}</td>
-                    <td>
-                        <span class="speed-down">⬇️ ${formatSpeed(dlspeed)}</span><br>
-                        <span class="speed-up">⬆️ ${formatSpeed(upspeed)}</span>
-                    </td>
-                    <td>${num_leechs}</td>
-                    <td>${num_seeds}</td>
-                    <td><span class="status-badge ${getStatusClass(state)}">${formatStatus(state)}</span></td>
-                    <td>${formatETA(eta)}</td>
-                    <td class="downloads-actions">
-                        <button onclick="pauseTorrent('${hash}')" title="Pause">⏸️</button>
-                        <button onclick="resumeTorrent('${hash}')" title="Resume">▶️</button>
-                        <button onclick="deleteTorrent('${hash}')" title="Delete">🗑️</button>
-                    </td>
-                </tr>
-                `;
-    }).join('');
+        // Основная строка
+        rows.push(`
+            <tr class="torrent-row" data-hash="${hash}">
+                <td class="name" title="${esc(name)}">
+                    <span class="expand-icon" onclick="toggleExpand('${hash}')" style="cursor:pointer; margin-right:5px;">
+                        ${expandedHash === hash ? '▼' : '▶'}
+                    </span>
+                    ${esc(name.substring(0, 60))}${name.length > 60 ? '...' : ''}
+                </td>
+                <td>${formatBytes(size)}</td>
+                <td style="min-width: 150px;">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" style="width: ${progress}%;"></div>
+                        <span class="progress-text">${progress.toFixed(1)}%</span>
+                    </div>
+                </td>
+                <td>${formatBytes(downloaded)}</td>
+                <td>
+                    <span class="speed-down">⬇️ ${formatSpeed(dlspeed)}</span><br>
+                    <span class="speed-up">⬆️ ${formatSpeed(upspeed)}</span>
+                </td>
+                <td>${num_leechs}</td>
+                <td>${num_seeds}</td>
+                <td><span class="status-badge ${getStatusClass(state)}">${formatStatus(state)}</span></td>
+                <td>${formatETA(eta)}</td>
+                <td class="downloads-actions">
+                    <button onclick="pauseTorrent('${hash}')" title="Pause">⏸️</button>
+                    <button onclick="resumeTorrent('${hash}')" title="Resume">▶️</button>
+                    <button onclick="deleteTorrent('${hash}')" title="Delete">🗑️</button>
+                </td>
+            </tr>
+        `);
 
-    downloadsTbody.innerHTML = rows;
+        // Если этот торрент раскрыт, добавляем панель с файлами
+        if (expandedHash === hash) {
+            if (!filesCache[hash]) {
+                rows.push(`
+                    <tr class="files-row" data-hash="${hash}">
+                        <td colspan="10" style="text-align:center; background:#f0f0f0;">
+                            Loading files... <span class="loading-spinner"></span>
+                        </td>
+                    </tr>
+                `);
+                // Если ещё не загружали файлы для этого хеша, загружаем
+                if (!filesCache[hash]) loadFilesForHash(hash, false);
+            } else {
+                rows.push(renderFilesTable(hash, filesCache[hash]));
+            }
+        }
+    });
+
+    downloadsTbody.innerHTML = rows.join('');
 }
 
-// Torrent actions
+function renderFilesTable(hash, files) {
+    if (!files || files.length === 0) {
+        return `
+            <tr class="files-row" data-hash="${hash}">
+                <td colspan="10" style="text-align:center; background:#f0f0f0;">
+                    No files information available.
+                </td>
+            </tr>
+        `;
+    }
+
+    const fileRows = files.map(file => {
+        const fileName = file.name || `File ${file.index}`;
+        const fileSize = formatBytes(file.size || 0);
+        const progress = file.progress ? (file.progress * 100).toFixed(1) : '0';
+        const isSelected = file.priority > 0; // приоритет > 0 значит качать
+        return `
+            <tr>
+                <td style="padding-left:20px;">
+                    <input type="checkbox" class="file-checkbox" data-file-id="${file.index}" data-hash="${hash}" ${isSelected ? 'checked' : ''}>
+                </td>
+                <td>${esc(fileName)}</td>
+                <td>${fileSize}</td>
+                <td>${progress}%</td>
+                <td>${file.priority !== undefined ? (file.priority > 0 ? 'Normal' : 'Skip') : 'Unknown'}</td>
+            </tr>
+        `;
+    }).join('');
+
+    const controls = `
+        <div style="display:flex; gap:10px; margin:5px 0;">
+            <button class="select-all-btn" data-hash="${hash}">Select All</button>
+            <button class="apply-files-btn" data-hash="${hash}">Apply</button>
+            <button class="collapse-btn" onclick="toggleExpand('${hash}')">Collapse</button>
+        </div>
+    `;
+
+    return `
+        <tr class="files-row" data-hash="${hash}">
+            <td colspan="10" style="background:#f9f9f9; padding:10px;">
+                <table style="width:100%; border-collapse:collapse;">
+                    <thead>
+                        <tr>
+                            <th style="width:30px;"></th>
+                            <th>File Name</th>
+                            <th>Size</th>
+                            <th>Progress</th>
+                            <th>Priority</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${fileRows}
+                    </tbody>
+                </table>
+                ${controls}
+            </td>
+        </tr>
+    `;
+}
+
+// ========== Управление раскрытием ==========
+window.toggleExpand = function(hash) {
+    if (expandedHash === hash) {
+        // Сворачиваем текущий
+        expandedHash = null;
+        stopFilesAutoRefresh();
+    } else {
+        // Раскрываем новый, закрывая предыдущий
+        expandedHash = hash;
+        startFilesAutoRefresh(hash);
+    }
+    loadDownloads(); // перерисовать
+};
+
+// ========== Действия с торрентами ==========
 window.pauseTorrent = async (hash) => {
     try {
         const response = await fetch('/api/qb/stop', {
@@ -153,30 +292,30 @@ window.pauseTorrent = async (hash) => {
             body: JSON.stringify({ hash })
         });
         const result = await response.json();
-        if (result.ok) {
-            loadDownloads();
-        } else {
-            alert('Error pausing torrent: ' + (result.body || result.error));
+        if (!result.ok) {
+            console.warn('Pause warning:', result.body || result.error);
         }
+        loadDownloads();
     } catch (e) {
+        console.error('Error pausing torrent:', e);
         alert('Error pausing torrent: ' + e.message);
     }
 };
 
 window.resumeTorrent = async (hash) => {
     try {
-        const response = await fetch('/api/qb/start', {  // было /api/qb/resume
+        const response = await fetch('/api/qb/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ hash })
         });
         const result = await response.json();
-        if (result.ok) {
-            loadDownloads();
-        } else {
-            alert('Error resuming torrent: ' + (result.body || result.error));
+        if (!result.ok) {
+            console.warn('Resume warning:', result.body || result.error);
         }
+        loadDownloads();
     } catch (e) {
+        console.error('Error resuming torrent:', e);
         alert('Error resuming torrent: ' + e.message);
     }
 };
@@ -189,25 +328,112 @@ window.deleteTorrent = async (hash) => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ hash })
         });
+        if (expandedHash === hash) {
+            expandedHash = null;
+            stopFilesAutoRefresh();
+        }
         loadDownloads();
     } catch (e) {
         alert('Error deleting torrent: ' + e.message);
     }
 };
 
-// Auto-refresh toggle
-toggleAutoRefresh.onclick = () => {
-    autoRefreshEnabled = !autoRefreshEnabled;
-    toggleAutoRefresh.textContent = autoRefreshEnabled ? '⏸️ Pause auto-refresh' : '▶️ Start auto-refresh';
+// ========== Обработка кнопок в панели файлов ==========
+downloadsTbody.addEventListener('click', async (e) => {
+    const target = e.target;
 
-    if (autoRefreshEnabled) {
-        loadDownloads();
+    // Select All
+    if (target.classList.contains('select-all-btn')) {
+        const hash = target.dataset.hash;
+        const checkboxes = document.querySelectorAll(`.file-checkbox[data-hash="${hash}"]`);
+        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+        checkboxes.forEach(cb => cb.checked = !allChecked);
     }
-};
 
-// Manual refresh
-refreshBtn.onclick = loadDownloads;
+    // Apply
+    if (target.classList.contains('apply-files-btn')) {
+        const hash = target.dataset.hash;
+        const checkboxes = document.querySelectorAll(`.file-checkbox[data-hash="${hash}"]`);
+        const selectedIds = [];
+        const unselectedIds = [];
 
+        checkboxes.forEach(cb => {
+            const fileId = parseInt(cb.dataset.fileId);
+            if (cb.checked) {
+                selectedIds.push(fileId);
+            } else {
+                unselectedIds.push(fileId);
+            }
+        });
+
+        try {
+            // Устанавливаем приоритеты: 1 для выбранных, 0 для невыбранных
+            if (selectedIds.length > 0) {
+                await fetch('/api/qb/setfileprio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hash, fileIds: selectedIds, priority: 1 })
+                });
+            }
+            if (unselectedIds.length > 0) {
+                await fetch('/api/qb/setfileprio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hash, fileIds: unselectedIds, priority: 0 })
+                });
+            }
+            // После изменения приоритетов обновляем кэш, чтобы отразить новые значения
+            // Можно просто перезагрузить файлы для этого хеша
+            await loadFilesForHash(hash, true);
+            // Запускаем торрент, если он на паузе
+            await resumeTorrent(hash);
+        } catch (err) {
+            alert('Error setting file priorities: ' + err.message);
+        }
+    }
+});
+
+// ========== Добавление торрента через поиск ==========
+async function addToQb(ev, provider, id) {
+    ev.preventDefault();
+    const qbUrl = `/api/qb/add?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`;
+    const r = await fetch(qbUrl);
+    const res = await r.json();
+    if (r.ok) {
+        alert("✅ Added to qB");
+
+        const hash = res.hash;
+        if (hash) {
+            // Ждём немного, чтобы qB инициализировал торрент
+            setTimeout(async () => {
+                // Загружаем информацию о файлах
+                try {
+                    const filesResp = await fetch(`/api/qb/files?hash=${encodeURIComponent(hash)}`);
+                    const filesData = await filesResp.json();
+                    if (filesData.ok && Array.isArray(filesData.files) && filesData.files.length > 1) {
+                        // Если файлов больше одного, ставим на паузу и раскрываем
+                        await pauseTorrent(hash);
+                        filesCache[hash] = filesData.files;
+                        expandedHash = hash;            // делаем раскрытым
+                        startFilesAutoRefresh(hash);    // запускаем автообновление
+                        loadDownloads();
+                    } else {
+                        loadDownloads();
+                    }
+                } catch (e) {
+                    console.error('Error checking files after add:', e);
+                    loadDownloads();
+                }
+            }, 2000);
+        } else {
+            loadDownloads();
+        }
+    } else {
+        alert(`❌ qB: ${res.body}`);
+    }
+}
+
+// ========== Поиск ==========
 async function prettyJson(url) {
     const r = await fetch(url);
     const t = await r.text();
@@ -230,25 +456,9 @@ function isProbablyVideo(item) {
     const cat = String(item.Category || '').toLowerCase();
     const name = String(item.Name || '').toLowerCase();
     const text = cat + ' ' + name;
-
-    const nonVideo = [
-        'саундтрек', 'soundtrack',
-        'mp3', 'flac', 'aac', 'music',
-        'аудиокнига', 'audiobook',
-        'pdf', 'djvu', 'xbox',
-        'software', 'linux', 'macos',
-        'RePack', 'amd64', 'Portable', 'DLCs',
-    ];
-
+    const nonVideo = [ 'саундтрек','soundtrack','mp3','flac','aac','music','аудиокнига','audiobook','pdf','djvu','xbox','software','linux','macos','RePack','amd64','Portable','DLCs' ];
     if (nonVideo.some(w => text.includes(w))) return false;
-
-    const videoHints = [
-        'hdrip', 'bdrip', 'bluray', 'web-dl', 'webrip', 'dvdrip',
-        'hdtv', 'uhd', '4k', '1080', '720',
-        'x264', 'x265', 'hevc', 'avc',
-        'remux', 'imaxi', 'imax', 'dts', 'ac3'
-    ];
-
+    const videoHints = [ 'hdrip','bdrip','bluray','web-dl','webrip','dvdrip','hdtv','uhd','4k','1080','720','x264','x265','hevc','avc','remux','imaxi','imax','dts','ac3' ];
     if (videoHints.some(w => text.includes(w))) return true;
     return true;
 }
@@ -256,17 +466,10 @@ function isProbablyVideo(item) {
 async function onMagnetClick(ev, provider, id) {
     ev.preventDefault();
     ev.stopPropagation();
-
-    if (!provider || !id) {
-        alert("No provider/id for magnet");
-        return;
-    }
-
+    if (!provider || !id) { alert("No provider/id for magnet"); return; }
     const url = `/api/magnet?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`;
-
     try {
         const r = await fetch(url);
-
         let raw;
         const ct = (r.headers.get("content-type") || "").toLowerCase();
         if (ct.includes("application/json")) raw = await r.json();
@@ -274,47 +477,33 @@ async function onMagnetClick(ev, provider, id) {
             const text = await r.text();
             try { raw = JSON.parse(text); } catch { raw = { ok: false, error: text }; }
         }
-
         if (!r.ok) throw new Error(raw?.error || `HTTP ${r.status}`);
         if (!raw?.ok) throw new Error(raw?.error || "magnet error");
-
         const magnet = raw.magnet;
         if (!magnet) throw new Error("No magnet in response");
-
         window.location.href = magnet;
     } catch (e) {
         alert(String(e?.message || e));
     }
 }
 
-async function addToQb(ev, provider, id) {
-    ev.preventDefault();
-    const qbUrl = `/api/qb/add?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}`;
-    const r = await fetch(qbUrl);
-    const res = await r.json();
-    if (r.ok) {
-        alert("✅ Added to qB");
-        loadDownloads(); // Refresh downloads list after adding
-    } else {
-        alert(`❌ qB: ${res.body}`);
+function flattenTorApiResponse(raw) {
+    const data = (raw && raw.data && raw.data.RuTracker !== undefined) ? raw.data
+        : (raw && raw.data && raw.data.data) ? raw.data.data
+        : null;
+    if (!data || typeof data !== 'object') return [];
+    const out = [];
+    for (const [provider, val] of Object.entries(data)) {
+        if (Array.isArray(val)) {
+            for (const item of val) out.push({ provider, ...item });
+        }
     }
-}
-
-function esc(s) {
-    return String(s ?? '').replace(/[&<>"']/g, ch => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[ch]));
+    return out;
 }
 
 function renderTable(items) {
-    if (!items.length) {
-        tableWrap.innerHTML = "<div>Ничего не найдено.</div>";
-        return;
-    }
-
+    if (!items.length) { tableWrap.innerHTML = "<div>Ничего не найдено.</div>"; return; }
     const rows = items.map((x, i) => {
-        const localTorrent = x.Torrent ? `/api/torrent?url=${encodeURIComponent(x.Torrent)}` : '';
-
         return `
             <tr>
                 <td>${i + 1}</td>
@@ -333,47 +522,12 @@ function renderTable(items) {
                     </div>
                 </td>
             </tr>
-            `;
-    }).join('');
-
-    tableWrap.innerHTML = `
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Provider</th>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Seeds</th>
-                <th>Peers</th>
-                <th>Date</th>
-                <th>Url</th>
-                <th>Torrent</th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
         `;
+    }).join('');
+    tableWrap.innerHTML = `<table><thead><tr><th>#</th><th>Provider</th><th>Name</th><th>Size</th><th>Seeds</th><th>Peers</th><th>Date</th><th>Url</th><th>Torrent</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-function flattenTorApiResponse(raw) {
-    const data = (raw && raw.data && raw.data.RuTracker !== undefined) ? raw.data
-        : (raw && raw.data && raw.data.data) ? raw.data.data
-            : null;
-
-    if (!data || typeof data !== 'object') return [];
-
-    const out = [];
-    for (const [provider, val] of Object.entries(data)) {
-        if (Array.isArray(val)) {
-            for (const item of val) out.push({ provider, ...item });
-        } else {
-            // игнорируем ошибки провайдеров
-        }
-    }
-    return out;
-}
-
+// ========== Обработчики кнопок ==========
 document.getElementById('btnTest').onclick = async () => {
     testStatus.textContent = 'Testing...';
     testOut.textContent = '';
@@ -402,20 +556,17 @@ document.getElementById('btnSearch').onclick = async () => {
         searchStatus.className = 'bad';
         return;
     }
-
     searchStatus.textContent = 'Searching...';
     searchStatus.className = '';
     searchMeta.textContent = '';
     searchOut.style.display = 'none';
     searchOut.textContent = '';
     tableWrap.innerHTML = '';
-
     try {
         const url = '/api/search?q=' + encodeURIComponent(query) + '&provider=all';
         const r = await fetch(url);
         const raw = await r.json();
         lastRaw = raw;
-
         if (!raw.ok) {
             searchStatus.textContent = 'ERROR';
             searchStatus.className = 'bad';
@@ -423,19 +574,12 @@ document.getElementById('btnSearch').onclick = async () => {
             searchOut.textContent = JSON.stringify(raw, null, 2);
             return;
         }
-
         let items = flattenTorApiResponse(raw);
-
-        if (onlyVideo.checked) {
-            items = items.filter(isProbablyVideo);
-        }
-
+        if (onlyVideo.checked) items = items.filter(isProbablyVideo);
         items.forEach(x => x.__bytes = parseSizeToBytes(x.Size));
         items.sort((a, b) => (b.__bytes - a.__bytes));
-
         searchMeta.textContent = `Found: ${items.length} items. Sorted by Size (desc).`;
         renderTable(items);
-
         searchStatus.textContent = 'OK';
         searchStatus.className = 'ok';
     } catch (e) {
@@ -446,12 +590,20 @@ document.getElementById('btnSearch').onclick = async () => {
     }
 };
 
-// Load downloads on page load
-loadDownloads();
+// Auto-refresh
+toggleAutoRefresh.onclick = () => {
+    autoRefreshEnabled = !autoRefreshEnabled;
+    toggleAutoRefresh.textContent = autoRefreshEnabled ? '⏸️ Pause auto-refresh' : '▶️ Start auto-refresh';
+    if (autoRefreshEnabled) loadDownloads();
+};
+refreshBtn.onclick = loadDownloads;
 
-// Auto-refresh every 5 seconds
+// Initial load and interval
+loadDownloads();
 setInterval(() => {
-    if (autoRefreshEnabled) {
-        loadDownloads();
-    }
+    if (autoRefreshEnabled) loadDownloads();
 }, 5000);
+
+// Экспортируем функции для глобального доступа (для onclick в HTML)
+window.addToQb = addToQb;
+window.onMagnetClick = onMagnetClick;
