@@ -1,6 +1,7 @@
 services:
   amnezia-vpn:
     image: isonecom/amneziawg-client:latest
+    platform: ${PLATFORM}
     container_name: amnezia-vpn
     restart: unless-stopped
     cap_add:
@@ -24,7 +25,7 @@ services:
         ip -4 addr add "$$ADDR" dev wg0 || true
 
         ip link set mtu 1420 up dev wg0
-
+        
         DNS="$$(awk -F' *= *' '/^DNS[[:space:]]*=/{print $$2; exit}' /config/wg0.conf)"
         if [ -n "$$DNS" ]; then
           printf "nameserver %s\n" "$$DNS" > /etc/resolv.conf
@@ -75,7 +76,7 @@ services:
       - normal-app
       - vpn-app
     ports:
-      - "8089:8080"
+      - "${WEBUI_PORT}:8080"
     environment:
       - PORT=8080
       - NORMAL_URL=http://normal-app:3001/test
@@ -84,17 +85,19 @@ services:
       - QB_URL=http://qbittorrent:8081
       - QB_USER=admin
       - QB_PASS=adminadmin
+
   torapi:
     image: lifailon/torapi:latest
+    platform: ${PLATFORM}
     container_name: torapi
     restart: unless-stopped
     depends_on:
       - amnezia-vpn
     network_mode: service:amnezia-vpn
-    # TorAPI будет доступен внутри сети как amnezia-vpn:8443, т.к. делит netns
 
   dl-proxy:
     image: node:20-slim
+    platform: ${PLATFORM}
     container_name: dl-proxy
     restart: unless-stopped
     depends_on:
@@ -110,15 +113,14 @@ services:
     container_name: qbittorrent
     restart: unless-stopped
     environment:
-      - PUID=1000  # твой UID (id -u)
-      - PGID=1000  # твой GID (id -g)
+      - PUID=${PUID}
+      - PGID=${PGID}
       - TZ=Europe/Moscow
       - WEBUI_PORT=8081
     volumes:
-      - ./torrents:/downloads  # общая папка с хостом
-      - ./qb-config:/config    # настройки
+      - ${DOWNLOADS_PATH}:/downloads
+      - ${QB_CONFIG_PATH}:/config
     ports:
-      - "8081:8081"      # WebUI с хоста
-      - "6881:6881"      # торрент TCP
-      - "6881:6881/udp"  # торрент UDP
-
+      - "8081:8081"
+      - "6881:6881"
+      - "6881:6881/udp"
