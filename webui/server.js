@@ -393,6 +393,43 @@ app.get("/api/qb/add", async (req, res) => {
   }
 });
 
+// Получить список файлов торрента
+app.get("/api/qb/files", async (req, res) => {
+  const { hash } = req.query;
+  if (!hash) return res.status(400).json({ ok: false, error: "Missing hash" });
+
+  try {
+    const result = await qbGetJson(`/api/v2/torrents/files?hash=${encodeURIComponent(hash)}`);
+    if (!result.ok) {
+      return res.status(502).json({ ok: false, error: "Failed to get files" });
+    }
+    res.json({ ok: true, files: result.json || [] });
+  } catch (e) {
+    handleQbError(res, e);
+  }
+});
+
+// Установить приоритеты файлов (один или несколько файлов с одинаковым приоритетом)
+app.post("/api/qb/setfileprio", async (req, res) => {
+  const { hash, fileIds, priority } = req.body; // fileIds - массив чисел
+  if (!hash || !Array.isArray(fileIds) || fileIds.length === 0 || priority === undefined) {
+    return res.status(400).json({ ok: false, error: "Missing hash, fileIds, or priority" });
+  }
+
+  try {
+    // qBittorrent API принимает ID через вертикальную черту
+    const params = {
+      hash: hash,
+      id: fileIds.join('|'),
+      priority: priority
+    };
+    const result = await qbPostForm("/api/v2/torrents/filePrio", params);
+    res.json(result);
+  } catch (e) {
+    handleQbError(res, e);
+  }
+});
+
 // ========== Обработчик ошибок ==========
 function handleQbError(res, e) {
   if (e.type === 'auth') {
