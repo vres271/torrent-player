@@ -6,3 +6,4 @@ qb-config/
 !qb-config/qBittorrent/qBittorrent.conf
 torrents
 *.stackdump
+jackett-config/
